@@ -1,0 +1,119 @@
+Metadata-Version: 2.4
+Name: agent-code-evaluator
+Version: 0.2.0
+Summary: Implement a spec in an existing Python repo: one model writes the tests, another the code, a third reviews.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.1
+Requires-Dist: openai>=1.40
+Requires-Dist: pytest>=8.0
+Requires-Dist: hypothesis>=6.0
+
+# ace — agent code evaluator
+
+Give it a feature spec and an existing Python repo. It returns a patch where:
+
+1. **Model A** wrote the tests from the spec before any feature code existed, and they failed.
+2. **Model B** wrote the code until those tests passed, without being able to change them, while
+  the repo's existing suite kept passing.
+3. Tests that **B never saw** also pass.
+4. **Model C**, reading only the spec and the diff, judged that the change meets the spec.
+
+```
+spec.md ──► A: write tests ──► red check ──► hide ~20% of test functions
+                                                   │
+             B: implement ◄── failures ── gate ◄───┘   gate = visible tests pass
+                  │                                         + no existing test newly fails
+                  ▼                                         (test/config edits are reverted)
+             held-out tests ──► patch ──► C: review spec + diff ──► PASS / FAIL
+                  │
+                  └── any fail ──► FAIL (no review)
+```
+
+The checks decide; the reviewer can only fail a run, never excuse a failure. It fails the run
+for missing requirements, cheating, tests that check the wrong thing, or a spec gap that changes
+behavior.
+
+
+
+## Install it
+
+You need `uv` and `git`. The project you run it on needs a git repo and pytest installed in its
+own environment (`ace` runs the project's tests with its `.venv` Python if it has one).
+
+Install `ace` as a standalone tool, not as a dependency of your project:
+
+```bash
+uv tool install /path/to/agent-code-evaluator      # or: uv tool install git+<repo url>
+```
+
+Then set it up once, in your terminal:
+
+```bash
+ace login                                   # prompts for the gateway URL and API key
+ace config                                  # asks for each role's model; Enter keeps the current one
+```
+
+Both save to `~/.ace/config.json`, readable only by you. All three models are required, and
+there is no `auto`. Environment variables (`MODEL_BASE_URL`, `MODEL_API_KEY`, `ACE_TEST_MODEL`,
+`ACE_IMPL_MODEL`, `ACE_REVIEW_MODEL`) override the saved settings, which is how CI configures it,
+and `ace run` flags override both. The gateway key is removed from the environment of every
+command the agents and tests run.
+
+Then, from your project root, with your work committed: `ace run specs/<feature>.md --repo .`
+
+`ace` only reads your repo: it never creates branches, commits, or pushes. It copies your last
+commit into `~/.ace/runs/<spec>-<timestamp>/` and works there. When it's done, that folder has
+`result.json` (the verdict and details) and `changes.patch` (the tests and the code). Applying
+and committing is up to you: `git apply ~/.ace/runs/<spec>-<timestamp>/changes.patch` from the
+repo root.
+
+Options: `--max-retries 3` (implementation attempts after the first), `--held-out 0.2`,
+`--python` (the interpreter for the repo's tests; defaults to the repo's `.venv`).
+
+## How it's meant to be used
+
+`ace` is run by an agent (Cursor, Cline, Claude Code, and so on), not by hand. The agent follows
+[`ace/SKILL.md`](ace/SKILL.md): it drafts the spec with you, asks about every place where two
+reasonable implementations would behave differently, locks the spec once you approve it, runs
+`ace`, and reports the result. The spec decides everything the three models build, so that
+conversation is where quality is won or lost.
+
+For Cline, run `ace init` from your project root. It writes `.cline/skills/ace/SKILL.md`; turn on
+Skills in Cline (Settings > Features > Enable Skills). For other harnesses, copy `ace/SKILL.md`
+to wherever they read skills, in a folder named `ace`.
+
+Specs are plain markdown describing behavior and examples.
+
+## What stops the implementer from cheating
+
+
+| Trick                                             | Countered by                                                         |
+| ------------------------------------------------- | -------------------------------------------------------------------- |
+| Editing or weakening the tests                    | Test files are rewritten from the harness's copy after every attempt |
+| Adding `conftest.py`, pytest or Hypothesis config | Reverted after every attempt                                         |
+| Hardcoding the visible examples                   | Held-out tests and Hypothesis properties it can't see in advance     |
+| Breaking something else to make it pass           | The full existing suite must not gain failures                       |
+| Tests that misread the spec                       | The reviewer judges against the spec, not the tests                  |
+
+
+The test writer and implementer get file tools limited to their working directory, plus a shell
+tool for running tests. The shell can still reach the rest of the machine, so this is a strong
+deterrent, not a sandbox. The reviewer is a single model call with the spec and diff, no tools.
+The gateway must support tool calling.
+
+## Code
+
+
+| File              | Does                                                |
+| ----------------- | --------------------------------------------------- |
+| `ace/pipeline.py` | The steps above                                     |
+| `ace/repo.py`     | Working copy, revert rules, pytest runs             |
+| `ace/heldout.py`  | Splits test files by function                       |
+| `ace/prompts.py`  | The three role prompts                              |
+| `ace/agents.py`   | Tool-using agent loop over an OpenAI-compatible API |
+| `ace/cli.py`      | `ace login`, `ace config`, `ace run`                |
+
+
+The previous, larger version (mutation testing, jury, round-trip, and more) is on the
+`archive/v1` branch.

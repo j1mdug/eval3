@@ -1,0 +1,2 @@
+[console_scripts]
+ace = ace.cli:main

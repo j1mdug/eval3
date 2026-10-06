@@ -1,0 +1,4 @@
+click>=8.1
+openai>=1.40
+pytest>=8.0
+hypothesis>=6.0
